@@ -45,7 +45,7 @@ module "eks_blueprints" {
   source = "github.com/aws-ia/terraform-aws-eks-blueprints"
 
   cluster_name    = local.cluster_name
-  cluster_version = "1.23"
+  cluster_version = "1.21"
 
   vpc_id             = module.vpc.vpc_id
   private_subnet_ids = module.vpc.private_subnets
@@ -54,7 +54,8 @@ module "eks_blueprints" {
     mg_5 = {
       node_group_name = "managed-ondemand"
       instance_types  = ["m5.large"]
-      min_size        = 2
+      min_size        = 3
+      max_size        = 5
       subnet_ids      = module.vpc.private_subnets
     }
   }
@@ -79,9 +80,8 @@ module "eks_blueprints_kubernetes_addons" {
   # Add-ons
   enable_aws_load_balancer_controller = true
   enable_metrics_server               = true
-  enable_aws_cloudwatch_metrics       = true
-  enable_kubecost                     = true
-  enable_gatekeeper                   = true
+  enable_velero           = true
+  velero_backup_s3_bucket = module.velero_backup_s3_bucket.s3_bucket_id
 
   enable_cluster_autoscaler = true
   cluster_autoscaler_helm_config = {
@@ -94,16 +94,6 @@ module "eks_blueprints_kubernetes_addons" {
     ]
   }
 
-  enable_cert_manager = true
-  cert_manager_helm_config = {
-    set_values = [
-      {
-        name  = "extraArgs[0]"
-        value = "--enable-certificate-owner-ref=false"
-      },
-    ]
-  }
-  enable_cert_manager_csi_driver = true
 
   tags = local.tags
 }
@@ -135,6 +125,13 @@ module "vpc" {
   manage_default_security_group = true
   default_security_group_tags   = { Name = "${local.name}-default" }
 
+  enable_flow_log                      = true
+  create_flow_log_cloudwatch_log_group = true
+  create_flow_log_cloudwatch_iam_role  = true
+  vpc_flow_log_tags = {
+    Name = "${local.name}-vpc-flow-logs"
+  }
+
   public_subnet_tags = {
     "kubernetes.io/cluster/${local.cluster_name}" = "shared"
     "kubernetes.io/role/elb"                      = 1
@@ -146,4 +143,66 @@ module "vpc" {
   }
 
   tags = local.tags
+}
+
+resource "random_string" "random" {
+  length  = 16
+  special = false
+  upper   = false
+}
+
+#tfsec:ignore:*
+module "velero_backup_s3_bucket" {
+  source  = "terraform-aws-modules/s3-bucket/aws"
+  version = "~> 3.0"
+
+  bucket = "velero-${random_string.random.result}"
+
+  # Allow deletion of non-empty bucket
+  # NOTE: This is enabled for example usage only, you should not enable this for production workloads
+  force_destroy = true
+
+  attach_deny_insecure_transport_policy = true
+  attach_require_latest_tls_policy      = true
+
+  acl = "private"
+
+  block_public_acls       = true
+  block_public_policy     = true
+  ignore_public_acls      = true
+  restrict_public_buckets = true
+
+  control_object_ownership = true
+  object_ownership         = "BucketOwnerPreferred"
+
+  versioning = {
+    status     = true
+    mfa_delete = false
+  }
+
+  server_side_encryption_configuration = {
+    rule = {
+      apply_server_side_encryption_by_default = {
+        sse_algorithm = "AES256"
+      }
+    }
+  }
+
+  tags = local.tags
+}
+
+resource "kubernetes_storage_class" "storage_class" {
+  metadata {
+    name = "gp3"
+  }
+
+  storage_provisioner    = "ebs.csi.aws.com"
+  allow_volume_expansion = true
+  reclaim_policy         = "Delete"
+  volume_binding_mode    = "WaitForFirstConsumer"
+  parameters = {
+    encrypted = true
+    fsType    = "ext4"
+    type      = "gp3"
+  }
 }
