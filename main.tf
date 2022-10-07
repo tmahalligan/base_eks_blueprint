@@ -1,6 +1,8 @@
 provider "aws" {
   region = local.region
+  required_version = ">= 4.33.0"
 }
+
 
 provider "kubernetes" {
   host                   = module.eks_blueprints.eks_cluster_endpoint
